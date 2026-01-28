@@ -21,7 +21,7 @@ st.write("ترجمة النصوص مع الحفاظ على التنسيق الأ
 st.sidebar.header("⚙️ إعدادات الترجمة")
 translation_mode = st.sidebar.radio(
     "اختر محرك الترجمة:",
-    ("الترجمة الذكية (Gemini 2.0)", "الترجمة السريعة (بدون مفتاح API)")
+    ("الترجمة الذكية (Gemini)", "الترجمة السريعة (بدون مفتاح API)")
 )
 
 # إعداد Gemini API
@@ -67,11 +67,14 @@ def translate_batch_gemini(texts, client):
     prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations concise and professional.\n\n"
     prompt += json.dumps(valid_texts)
 
+    # استخدام موديل gemini-2.5-flash المتاح في حساب المستخدم
+    model_name = "gemini-2.5-flash"
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=model_name,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                 ),
@@ -85,10 +88,12 @@ def translate_batch_gemini(texts, client):
                     results[int(idx)] = translated
                 return results
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait_time = (attempt + 1) * 2
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                wait_time = (attempt + 1) * 5
                 time.sleep(wait_time)
                 continue
+            st.error(f"خطأ في Gemini: {e}")
             break
     return texts
 
@@ -103,11 +108,9 @@ def process_pdf(input_pdf_path, font_path, client, mode):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        # إنشاء صفحة جديدة في ملف المخرجات بنفس أبعاد الصفحة الأصلية
         page = doc[page_num]
         new_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
         
-        # استخراج النصوص
         blocks = page.get_text("dict")["blocks"]
         all_spans = []
         texts_to_translate = []
@@ -121,18 +124,19 @@ def process_pdf(input_pdf_path, font_path, client, mode):
                             texts_to_translate.append(s["text"])
         
         if texts_to_translate:
-            if mode == "الترجمة الذكية (Gemini 2.0)":
+            if mode == "الترجمة الذكية (Gemini)":
                 if not client:
                     st.error("مفتاح Gemini API غير متوفر!")
                     return None
-                # ترجمة Gemini (Batch أكبر لتقليل عدد الطلبات)
-                batch_size = 50
+                # حجم دفعة مناسب لموديل 2.5 فلاش
+                batch_size = 40
                 translated_texts = []
                 for i in range(0, len(texts_to_translate), batch_size):
                     batch = texts_to_translate[i:i+batch_size]
                     translated_texts.extend(translate_batch_gemini(batch, client))
+                    if len(texts_to_translate) > batch_size:
+                        time.sleep(0.5) # تأخير بسيط جداً
             else:
-                # الترجمة المحلية المتوازية (أسرع بكثير)
                 translated_texts = translate_batch_local(texts_to_translate)
             
             for s, translated_text in zip(all_spans, translated_texts):
