@@ -1,6 +1,5 @@
 pymupdf
 streamlit
-google-generativeai
+google-genai
 arabic-reshaper
 python-bidi
-fpdf2
