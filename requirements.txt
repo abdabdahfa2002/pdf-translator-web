@@ -1,0 +1,6 @@
+pymupdf
+streamlit
+openai
+arabic-reshaper
+python-bidi
+fpdf2
