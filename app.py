@@ -7,14 +7,15 @@ import os
 import tempfile
 import time
 import json
+import concurrent.futures
 from arabic_reshaper import reshape
 from bidi.algorithm import get_display
 
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-st.title("🚀 مترجم PDF الاحترافي (Gemini + الترجمة المحلية)")
-st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي للملف.")
+st.title("🚀 مترجم PDF الاحترافي (Gemini + الترجمة المتوازية)")
+st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي للملف وبسرعة عالية.")
 
 # إعدادات الشريط الجانبي
 st.sidebar.header("⚙️ إعدادات الترجمة")
@@ -40,15 +41,22 @@ client = get_gemini_client()
 
 def translate_text_local(text):
     """ترجمة النص باستخدام مكتبة محلية (Google Translate API المجاني)"""
+    if not text.strip() or len(text.strip()) < 2:
+        return text
     try:
         translated = GoogleTranslator(source='en', target='ar').translate(text)
         return translated
     except Exception as e:
-        print(f"خطأ في الترجمة المحلية: {e}")
         return text
 
+def translate_batch_local(texts):
+    """ترجمة مجموعة من النصوص بالتوازي لتسريع العملية المحلية"""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(translate_text_local, texts))
+    return results
+
 def translate_batch_gemini(texts, client):
-    """ترجمة مجموعة من النصوص باستخدام Gemini"""
+    """ترجمة مجموعة من النصوص باستخدام Gemini مع معالجة الأخطاء"""
     if not texts or not client:
         return texts
     
@@ -56,7 +64,7 @@ def translate_batch_gemini(texts, client):
     if not valid_texts:
         return texts
 
-    prompt = "Translate the following list of English strings to Arabic. Return the result as a JSON object where keys are the original indices and values are the translated strings. Keep translations concise.\n\n"
+    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations concise and professional.\n\n"
     prompt += json.dumps(valid_texts)
 
     max_retries = 3
@@ -78,7 +86,8 @@ def translate_batch_gemini(texts, client):
                 return results
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                time.sleep((attempt + 1) * 5)
+                wait_time = (attempt + 1) * 2
+                time.sleep(wait_time)
                 continue
             break
     return texts
@@ -94,15 +103,12 @@ def process_pdf(input_pdf_path, font_path, client, mode):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        # 1. إضافة الصفحة الأصلية
-        output_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
+        # إنشاء صفحة جديدة في ملف المخرجات بنفس أبعاد الصفحة الأصلية
+        page = doc[page_num]
+        new_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
         
-        # 2. إنشاء نسخة مترجمة
-        temp_doc = fitz.open()
-        temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-        translated_page = temp_doc[0]
-        
-        blocks = translated_page.get_text("dict")["blocks"]
+        # استخراج النصوص
+        blocks = page.get_text("dict")["blocks"]
         all_spans = []
         texts_to_translate = []
         
@@ -115,32 +121,29 @@ def process_pdf(input_pdf_path, font_path, client, mode):
                             texts_to_translate.append(s["text"])
         
         if texts_to_translate:
-            translated_texts = []
             if mode == "الترجمة الذكية (Gemini 2.0)":
                 if not client:
                     st.error("مفتاح Gemini API غير متوفر!")
                     return None
-                # ترجمة Gemini (Batch)
-                batch_size = 20
+                # ترجمة Gemini (Batch أكبر لتقليل عدد الطلبات)
+                batch_size = 50
+                translated_texts = []
                 for i in range(0, len(texts_to_translate), batch_size):
                     batch = texts_to_translate[i:i+batch_size]
                     translated_texts.extend(translate_batch_gemini(batch, client))
-                    time.sleep(1)
             else:
-                # الترجمة المحلية (Slower but no API limits)
-                for t in texts_to_translate:
-                    translated_texts.append(translate_text_local(t))
+                # الترجمة المحلية المتوازية (أسرع بكثير)
+                translated_texts = translate_batch_local(texts_to_translate)
             
             for s, translated_text in zip(all_spans, translated_texts):
                 reshaped_text = reshape(translated_text)
                 bidi_text = get_display(reshaped_text)
                 
                 rect = fitz.Rect(s["bbox"])
-                translated_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
-                
                 font_size = s["size"]
+                
                 try:
-                    translated_page.insert_text(
+                    new_page.insert_text(
                         rect.bl + (0, -1),
                         bidi_text,
                         fontname="f0",
@@ -151,8 +154,6 @@ def process_pdf(input_pdf_path, font_path, client, mode):
                 except Exception:
                     pass
         
-        output_pdf.insert_pdf(temp_doc)
-        temp_doc.close()
         progress_bar.progress((page_num + 1) / total_pages)
     
     output_path = "translated_output.pdf"
@@ -181,7 +182,7 @@ if uploaded_file is not None:
                         st.success("تمت الترجمة بنجاح!")
                         with open(final_pdf_path, "rb") as f:
                             st.download_button(
-                                label="تحميل الملف المترجم (أصل + ترجمة)",
+                                label="تحميل الملف المترجم",
                                 data=f,
                                 file_name="translated_document.pdf",
                                 mime="application/pdf"
