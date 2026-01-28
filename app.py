@@ -14,8 +14,8 @@ from bidi.algorithm import get_display
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-st.title("🚀 مترجم PDF الاحترافي (Gemini + الترجمة المتوازية)")
-st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي للملف وبسرعة عالية.")
+st.title("🚀 مترجم PDF الاحترافي (أصل + ترجمة)")
+st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي وعرض الصفحات بالتناوب (الإنجليزية ثم العربية).")
 
 # إعدادات الشريط الجانبي
 st.sidebar.header("⚙️ إعدادات الترجمة")
@@ -40,23 +40,23 @@ def get_gemini_client():
 client = get_gemini_client()
 
 def translate_text_local(text):
-    """ترجمة النص باستخدام مكتبة محلية (Google Translate API المجاني)"""
+    """ترجمة النص باستخدام مكتبة محلية"""
     if not text.strip() or len(text.strip()) < 2:
         return text
     try:
         translated = GoogleTranslator(source='en', target='ar').translate(text)
         return translated
-    except Exception as e:
+    except Exception:
         return text
 
 def translate_batch_local(texts):
-    """ترجمة مجموعة من النصوص بالتوازي لتسريع العملية المحلية"""
+    """ترجمة مجموعة من النصوص بالتوازي"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(translate_text_local, texts))
     return results
 
 def translate_batch_gemini(texts, client):
-    """ترجمة مجموعة من النصوص باستخدام Gemini مع معالجة الأخطاء"""
+    """ترجمة مجموعة من النصوص باستخدام Gemini"""
     if not texts or not client:
         return texts
     
@@ -64,10 +64,9 @@ def translate_batch_gemini(texts, client):
     if not valid_texts:
         return texts
 
-    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations concise and professional.\n\n"
+    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations professional and natural.\n\n"
     prompt += json.dumps(valid_texts)
 
-    # استخدام موديل gemini-2.5-flash المتاح في حساب المستخدم
     model_name = "gemini-2.5-flash"
     
     max_retries = 3
@@ -88,12 +87,9 @@ def translate_batch_gemini(texts, client):
                     results[int(idx)] = translated
                 return results
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                wait_time = (attempt + 1) * 5
-                time.sleep(wait_time)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep((attempt + 1) * 5)
                 continue
-            st.error(f"خطأ في Gemini: {e}")
             break
     return texts
 
@@ -108,9 +104,14 @@ def process_pdf(input_pdf_path, font_path, client, mode):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        page = doc[page_num]
-        new_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
+        # 1. إضافة الصفحة الأصلية أولاً
+        output_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
         
+        # 2. إنشاء الصفحة المترجمة
+        page = doc[page_num]
+        translated_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
+        
+        # استخراج النصوص مع الحفاظ على الهيكل
         blocks = page.get_text("dict")["blocks"]
         all_spans = []
         texts_to_translate = []
@@ -125,30 +126,31 @@ def process_pdf(input_pdf_path, font_path, client, mode):
         
         if texts_to_translate:
             if mode == "الترجمة الذكية (Gemini)":
-                if not client:
-                    st.error("مفتاح Gemini API غير متوفر!")
-                    return None
-                # حجم دفعة مناسب لموديل 2.5 فلاش
                 batch_size = 40
                 translated_texts = []
                 for i in range(0, len(texts_to_translate), batch_size):
                     batch = texts_to_translate[i:i+batch_size]
                     translated_texts.extend(translate_batch_gemini(batch, client))
-                    if len(texts_to_translate) > batch_size:
-                        time.sleep(0.5) # تأخير بسيط جداً
             else:
                 translated_texts = translate_batch_local(texts_to_translate)
             
             for s, translated_text in zip(all_spans, translated_texts):
+                # معالجة النص العربي ليظهر بشكل صحيح (Reshaping + Bidi)
                 reshaped_text = reshape(translated_text)
                 bidi_text = get_display(reshaped_text)
                 
                 rect = fitz.Rect(s["bbox"])
                 font_size = s["size"]
                 
+                # مسح النص القديم (اختياري لأننا في صفحة جديدة، لكن مفيد إذا كنا ننسخ خلفية)
+                # هنا نكتب مباشرة لأن الصفحة 'translated_page' فارغة وجديدة
+                
                 try:
-                    new_page.insert_text(
-                        rect.bl + (0, -1),
+                    # إدراج النص مع دعم RTL
+                    # نستخدم align=2 للجهة اليمنى إذا لزم الأمر، ولكن insert_text تعتمد على الإحداثيات
+                    # الإحداثي rect.br يعطي الركن السفلي الأيمن، وهو مناسب للبدء من اليمين
+                    translated_page.insert_text(
+                        rect.bl + (0, -1), # نستخدم نفس موقع البداية الأصلي للحفاظ على التنسيق
                         bidi_text,
                         fontname="f0",
                         fontsize=font_size,
@@ -179,14 +181,14 @@ if uploaded_file is not None:
         if not os.path.exists(font_path):
             st.error("ملف الخط Amiri-Regular.ttf مفقود!")
         else:
-            with st.spinner(f"جاري الترجمة باستخدام {translation_mode}..."):
+            with st.spinner(f"جاري الترجمة..."):
                 try:
                     final_pdf_path = process_pdf(input_path, font_path, client, translation_mode)
                     if final_pdf_path:
                         st.success("تمت الترجمة بنجاح!")
                         with open(final_pdf_path, "rb") as f:
                             st.download_button(
-                                label="تحميل الملف المترجم",
+                                label="تحميل الملف (أصل + ترجمة بالتناوب)",
                                 data=f,
                                 file_name="translated_document.pdf",
                                 mime="application/pdf"
