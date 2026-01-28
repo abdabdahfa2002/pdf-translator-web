@@ -2,6 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
+from deep_translator import GoogleTranslator
 import os
 import tempfile
 import time
@@ -10,10 +11,17 @@ from arabic_reshaper import reshape
 from bidi.algorithm import get_display
 
 # إعداد واجهة المستخدم
-st.set_page_config(page_title="مترجم PDF بـ Gemini", layout="wide")
+st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-st.title("🚀 مترجم PDF الاحترافي (مدعوم بـ Gemini 2.0)")
-st.write("ترجمة النصوص مع الحفاظ على الصور والتنسيق الأصلي للملف.")
+st.title("🚀 مترجم PDF الاحترافي (Gemini + الترجمة المحلية)")
+st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي للملف.")
+
+# إعدادات الشريط الجانبي
+st.sidebar.header("⚙️ إعدادات الترجمة")
+translation_mode = st.sidebar.radio(
+    "اختر محرك الترجمة:",
+    ("الترجمة الذكية (Gemini 2.0)", "الترجمة السريعة (بدون مفتاح API)")
+)
 
 # إعداد Gemini API
 gemini_key = st.secrets.get("GEMINI_API_KEY")
@@ -25,13 +33,22 @@ def get_gemini_client():
         client = genai.Client(api_key=gemini_key)
         return client
     except Exception as e:
-        st.error(f"خطأ في تهيئة Gemini Client: {e}")
+        st.sidebar.error(f"خطأ في تهيئة Gemini: {e}")
         return None
 
 client = get_gemini_client()
 
-def translate_batch(texts, client):
-    """ترجمة مجموعة من النصوص في طلب واحد مع معالجة ذكية للـ Quota"""
+def translate_text_local(text):
+    """ترجمة النص باستخدام مكتبة محلية (Google Translate API المجاني)"""
+    try:
+        translated = GoogleTranslator(source='en', target='ar').translate(text)
+        return translated
+    except Exception as e:
+        print(f"خطأ في الترجمة المحلية: {e}")
+        return text
+
+def translate_batch_gemini(texts, client):
+    """ترجمة مجموعة من النصوص باستخدام Gemini"""
     if not texts or not client:
         return texts
     
@@ -42,7 +59,7 @@ def translate_batch(texts, client):
     prompt = "Translate the following list of English strings to Arabic. Return the result as a JSON object where keys are the original indices and values are the translated strings. Keep translations concise.\n\n"
     prompt += json.dumps(valid_texts)
 
-    max_retries = 5
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -60,19 +77,13 @@ def translate_batch(texts, client):
                     results[int(idx)] = translated
                 return results
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                wait_time = (attempt + 1) * 10 # انتظار أطول للـ Free Tier
-                st.sidebar.warning(f"تم تجاوز الحصة (Quota). جاري الانتظار {wait_time} ثانية...")
-                time.sleep(wait_time)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep((attempt + 1) * 5)
                 continue
-            st.sidebar.error(f"خطأ في الترجمة: {e}")
             break
-    
     return texts
 
-def process_pdf_dual_page(input_pdf_path, font_path, client):
-    """معالجة الملف ليكون (صفحة أصلية تليها صفحة مترجمة)"""
+def process_pdf(input_pdf_path, font_path, client, mode):
     doc = fitz.open(input_pdf_path)
     output_pdf = fitz.open()
     
@@ -83,10 +94,10 @@ def process_pdf_dual_page(input_pdf_path, font_path, client):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        # 1. إضافة الصفحة الأصلية كما هي
+        # 1. إضافة الصفحة الأصلية
         output_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
         
-        # 2. إنشاء نسخة مترجمة من نفس الصفحة
+        # 2. إنشاء نسخة مترجمة
         temp_doc = fitz.open()
         temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
         translated_page = temp_doc[0]
@@ -104,21 +115,27 @@ def process_pdf_dual_page(input_pdf_path, font_path, client):
                             texts_to_translate.append(s["text"])
         
         if texts_to_translate:
-            # استخدام Batch أصغر للـ Free Tier لتجنب الـ Timeout
-            batch_size = 15 
             translated_texts = []
-            for i in range(0, len(texts_to_translate), batch_size):
-                batch = texts_to_translate[i:i+batch_size]
-                translated_batch = translate_batch(batch, client)
-                translated_texts.extend(translated_batch)
-                time.sleep(2) # تأخير بسيط بين الـ Batches لتجنب الـ Rate Limit
+            if mode == "الترجمة الذكية (Gemini 2.0)":
+                if not client:
+                    st.error("مفتاح Gemini API غير متوفر!")
+                    return None
+                # ترجمة Gemini (Batch)
+                batch_size = 20
+                for i in range(0, len(texts_to_translate), batch_size):
+                    batch = texts_to_translate[i:i+batch_size]
+                    translated_texts.extend(translate_batch_gemini(batch, client))
+                    time.sleep(1)
+            else:
+                # الترجمة المحلية (Slower but no API limits)
+                for t in texts_to_translate:
+                    translated_texts.append(translate_text_local(t))
             
             for s, translated_text in zip(all_spans, translated_texts):
                 reshaped_text = reshape(translated_text)
                 bidi_text = get_display(reshaped_text)
                 
                 rect = fitz.Rect(s["bbox"])
-                # مسح النص الأصلي
                 translated_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
                 
                 font_size = s["size"]
@@ -131,53 +148,46 @@ def process_pdf_dual_page(input_pdf_path, font_path, client):
                         fontfile=font_path,
                         color=fitz.pdfcolor["black"]
                     )
-                except Exception as e:
-                    print(f"خطأ في إدراج النص: {e}")
+                except Exception:
+                    pass
         
-        # إضافة الصفحة المترجمة بعد الصفحة الأصلية
         output_pdf.insert_pdf(temp_doc)
         temp_doc.close()
         progress_bar.progress((page_num + 1) / total_pages)
     
-    output_path = "translated_dual_layout.pdf"
+    output_path = "translated_output.pdf"
     output_pdf.save(output_path)
     output_pdf.close()
     doc.close()
     return output_path
 
-# واجهة المستخدم
-if not gemini_key:
-    st.error("⚠️ مفتاح Gemini API مفقود. يرجى إضافته في إعدادات Secrets باسم GEMINI_API_KEY.")
-
-uploaded_file = st.file_uploader("ارفع ملف الـ PDF الإنجليزي هنا", type="pdf")
+# واجهة رفع الملفات
+uploaded_file = st.file_uploader("ارفع ملف الـ PDF هنا", type="pdf")
 
 if uploaded_file is not None:
-    if st.button("ابدأ الترجمة (صفحة أصلية + صفحة مترجمة)"):
-        if not gemini_key:
-            st.error("لا يمكن البدء بدون مفتاح API.")
+    if st.button("ابدأ عملية الترجمة"):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
+            tmp_input.write(uploaded_file.read())
+            input_path = tmp_input.name
+        
+        font_path = "Amiri-Regular.ttf"
+        if not os.path.exists(font_path):
+            st.error("ملف الخط Amiri-Regular.ttf مفقود!")
         else:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
-                tmp_input.write(uploaded_file.read())
-                input_path = tmp_input.name
-            
-            font_path = "Amiri-Regular.ttf"
-            if not os.path.exists(font_path):
-                st.error(f"ملف الخط {font_path} غير موجود!")
-            else:
-                with st.spinner("جاري الترجمة... قد يستغرق الأمر وقتاً بسبب حدود الحصة المجانية (Free Tier)"):
-                    try:
-                        final_pdf_path = process_pdf_dual_page(input_path, font_path, client)
+            with st.spinner(f"جاري الترجمة باستخدام {translation_mode}..."):
+                try:
+                    final_pdf_path = process_pdf(input_path, font_path, client, translation_mode)
+                    if final_pdf_path:
                         st.success("تمت الترجمة بنجاح!")
-                        
                         with open(final_pdf_path, "rb") as f:
                             st.download_button(
-                                label="تحميل الملف المدمج (أصل + ترجمة)",
+                                label="تحميل الملف المترجم (أصل + ترجمة)",
                                 data=f,
-                                file_name="translated_dual_pages.pdf",
+                                file_name="translated_document.pdf",
                                 mime="application/pdf"
                             )
-                    except Exception as e:
-                        st.error(f"حدث خطأ: {str(e)}")
-                    finally:
-                        if os.path.exists(input_path):
-                            os.unlink(input_path)
+                except Exception as e:
+                    st.error(f"حدث خطأ: {e}")
+                finally:
+                    if os.path.exists(input_path):
+                        os.unlink(input_path)

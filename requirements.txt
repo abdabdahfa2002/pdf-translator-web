@@ -1,5 +1,6 @@
 pymupdf
 streamlit
 google-genai
+deep-translator
 arabic-reshaper
 python-bidi
