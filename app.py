@@ -14,14 +14,12 @@ from bidi.algorithm import get_display
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-# إخفاء عناصر Streamlit الافتراضية (Header, Footer, Menu)
+# إخفاء أدوات المطور فقط (Header, Footer, Deploy Button)
 hide_st_style = """
             <style>
-            #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
             .stAppDeployButton {display:none;}
-            [data-testid="stToolbar"] {visibility: hidden !important;}
             [data-testid="stDecoration"] {display:none !important;}
             </style>
             """
