@@ -14,8 +14,8 @@ from bidi.algorithm import get_display
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-st.title("🚀 مترجم PDF الاحترافي (أصل + ترجمة مع الحفاظ على التنسيق)")
-st.write("ترجمة النصوص مع الحفاظ الكامل على الجداول، الصور، والشعارات.")
+st.title("🚀 مترجم PDF الاحترافي (معالجة الفقرات الذكية)")
+st.write("ترجمة النصوص ككتل كاملة للحفاظ على ترتيب الجمل العربية وتنسيق الجداول.")
 
 # إعدادات الشريط الجانبي
 st.sidebar.header("⚙️ إعدادات الترجمة")
@@ -60,7 +60,7 @@ def translate_batch_gemini(texts, client):
     if not valid_texts:
         return texts
 
-    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations professional.\n\n"
+    prompt = "Translate the following list of English paragraphs to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep the translation natural and professional.\n\n"
     prompt += json.dumps(valid_texts)
 
     model_name = "gemini-2.5-flash"
@@ -96,30 +96,32 @@ def process_pdf(input_pdf_path, font_path, client, mode):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        # 1. إضافة الصفحة الأصلية (الإنجليزية)
+        # 1. إضافة الصفحة الأصلية
         output_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
         
-        # 2. إنشاء الصفحة المترجمة (نسخة كاملة من الأصلية للحفاظ على الجداول والصور)
+        # 2. إنشاء الصفحة المترجمة (نسخة من الأصلية)
         temp_doc = fitz.open()
         temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
         translated_page = temp_doc[0]
         
-        # استخراج النصوص
-        blocks = translated_page.get_text("dict")["blocks"]
-        all_spans = []
+        # استخراج النصوص كـ Blocks (فقرات) بدلاً من Spans
+        blocks = translated_page.get_text("blocks")
+        # block format: (x0, y0, x1, y1, "text", block_no, block_type)
+        
         texts_to_translate = []
+        valid_blocks = []
         
         for b in blocks:
-            if "lines" in b:
-                for l in b["lines"]:
-                    for s in l["spans"]:
-                        if s["text"].strip():
-                            all_spans.append(s)
-                            texts_to_translate.append(s["text"])
+            text = b[4].strip()
+            if text and b[6] == 0: # block_type 0 is text
+                # تنظيف النص من علامات السطر الجديد الزائدة لضمان ترجمة الفقرة ككتلة
+                clean_text = " ".join(text.split())
+                texts_to_translate.append(clean_text)
+                valid_blocks.append(b)
         
         if texts_to_translate:
             if mode == "الترجمة الذكية (Gemini)":
-                batch_size = 40
+                batch_size = 20 # تقليل الحجم للفقرات الطويلة
                 translated_texts = []
                 for i in range(0, len(texts_to_translate), batch_size):
                     batch = texts_to_translate[i:i+batch_size]
@@ -127,33 +129,34 @@ def process_pdf(input_pdf_path, font_path, client, mode):
             else:
                 translated_texts = translate_batch_local(texts_to_translate)
             
-            for s, translated_text in zip(all_spans, translated_texts):
+            for b, translated_text in zip(valid_blocks, translated_texts):
+                # معالجة النص العربي
                 reshaped_text = reshape(translated_text)
                 bidi_text = get_display(reshaped_text)
                 
-                rect = fitz.Rect(s["bbox"])
-                font_size = s["size"]
+                # إحداثيات البلوك بالكامل
+                rect = fitz.Rect(b[:4])
                 
-                # مسح النص الأصلي عن طريق رسم مستطيل أبيض فوقه (للحفاظ على الخلفية)
-                # نستخدم لون الخلفية إذا كان متاحاً، أو الأبيض كافتراضي
+                # مسح البلوك بالكامل (مستطيل أبيض)
                 translated_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
                 
+                # تقدير حجم الخط بناءً على مساحة البلوك (أو استخدام حجم افتراضي مناسب)
+                # بما أننا نتعامل مع بلوك، سنستخدم textbox لضمان التفاف النص تلقائياً
                 try:
-                    translated_page.insert_text(
-                        rect.bl + (0, -1),
+                    translated_page.insert_textbox(
+                        rect,
                         bidi_text,
                         fontname="f0",
-                        fontsize=font_size,
+                        fontsize=10, # حجم افتراضي، يمكن تحسينه لاحقاً
                         fontfile=font_path,
-                        color=fitz.pdfcolor["black"]
+                        color=fitz.pdfcolor["black"],
+                        align=fitz.TEXT_ALIGN_RIGHT # محاذاة لليمين
                     )
                 except Exception:
                     pass
         
-        # إضافة الصفحة المترجمة (التي أصبحت تحتوي على الجداول الأصلية والنص الجديد)
         output_pdf.insert_pdf(temp_doc)
         temp_doc.close()
-        
         progress_bar.progress((page_num + 1) / total_pages)
     
     output_path = "translated_output.pdf"
@@ -182,7 +185,7 @@ if uploaded_file is not None:
                         st.success("تمت الترجمة بنجاح!")
                         with open(final_pdf_path, "rb") as f:
                             st.download_button(
-                                label="تحميل الملف (أصل + ترجمة مع الحفاظ على التنسيق)",
+                                label="تحميل الملف (معالجة الفقرات الذكية)",
                                 data=f,
                                 file_name="translated_document.pdf",
                                 mime="application/pdf"
