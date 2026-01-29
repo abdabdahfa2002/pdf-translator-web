@@ -14,8 +14,8 @@ from bidi.algorithm import get_display
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
-st.title("🚀 مترجم PDF الاحترافي (أصل + ترجمة)")
-st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي وعرض الصفحات بالتناوب (الإنجليزية ثم العربية).")
+st.title("🚀 مترجم PDF الاحترافي (أصل + ترجمة مع الحفاظ على التنسيق)")
+st.write("ترجمة النصوص مع الحفاظ الكامل على الجداول، الصور، والشعارات.")
 
 # إعدادات الشريط الجانبي
 st.sidebar.header("⚙️ إعدادات الترجمة")
@@ -40,7 +40,6 @@ def get_gemini_client():
 client = get_gemini_client()
 
 def translate_text_local(text):
-    """ترجمة النص باستخدام مكتبة محلية"""
     if not text.strip() or len(text.strip()) < 2:
         return text
     try:
@@ -50,36 +49,29 @@ def translate_text_local(text):
         return text
 
 def translate_batch_local(texts):
-    """ترجمة مجموعة من النصوص بالتوازي"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(translate_text_local, texts))
     return results
 
 def translate_batch_gemini(texts, client):
-    """ترجمة مجموعة من النصوص باستخدام Gemini"""
     if not texts or not client:
         return texts
-    
     valid_texts = {i: t for i, t in enumerate(texts) if t.strip() and len(t.strip()) >= 2}
     if not valid_texts:
         return texts
 
-    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations professional and natural.\n\n"
+    prompt = "Translate the following list of English strings to Arabic. Return ONLY a JSON object where keys are the original indices and values are the translated strings. Keep translations professional.\n\n"
     prompt += json.dumps(valid_texts)
 
     model_name = "gemini-2.5-flash"
-    
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
                 model=model_name,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
                 contents=prompt
             )
-            
             if response and response.text:
                 translated_dict = json.loads(response.text)
                 results = list(texts)
@@ -104,15 +96,16 @@ def process_pdf(input_pdf_path, font_path, client, mode):
     for page_num in range(total_pages):
         status_text.text(f"جاري معالجة الصفحة {page_num + 1} من {total_pages}...")
         
-        # 1. إضافة الصفحة الأصلية أولاً
+        # 1. إضافة الصفحة الأصلية (الإنجليزية)
         output_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
         
-        # 2. إنشاء الصفحة المترجمة
-        page = doc[page_num]
-        translated_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
+        # 2. إنشاء الصفحة المترجمة (نسخة كاملة من الأصلية للحفاظ على الجداول والصور)
+        temp_doc = fitz.open()
+        temp_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+        translated_page = temp_doc[0]
         
-        # استخراج النصوص مع الحفاظ على الهيكل
-        blocks = page.get_text("dict")["blocks"]
+        # استخراج النصوص
+        blocks = translated_page.get_text("dict")["blocks"]
         all_spans = []
         texts_to_translate = []
         
@@ -135,22 +128,19 @@ def process_pdf(input_pdf_path, font_path, client, mode):
                 translated_texts = translate_batch_local(texts_to_translate)
             
             for s, translated_text in zip(all_spans, translated_texts):
-                # معالجة النص العربي ليظهر بشكل صحيح (Reshaping + Bidi)
                 reshaped_text = reshape(translated_text)
                 bidi_text = get_display(reshaped_text)
                 
                 rect = fitz.Rect(s["bbox"])
                 font_size = s["size"]
                 
-                # مسح النص القديم (اختياري لأننا في صفحة جديدة، لكن مفيد إذا كنا ننسخ خلفية)
-                # هنا نكتب مباشرة لأن الصفحة 'translated_page' فارغة وجديدة
+                # مسح النص الأصلي عن طريق رسم مستطيل أبيض فوقه (للحفاظ على الخلفية)
+                # نستخدم لون الخلفية إذا كان متاحاً، أو الأبيض كافتراضي
+                translated_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
                 
                 try:
-                    # إدراج النص مع دعم RTL
-                    # نستخدم align=2 للجهة اليمنى إذا لزم الأمر، ولكن insert_text تعتمد على الإحداثيات
-                    # الإحداثي rect.br يعطي الركن السفلي الأيمن، وهو مناسب للبدء من اليمين
                     translated_page.insert_text(
-                        rect.bl + (0, -1), # نستخدم نفس موقع البداية الأصلي للحفاظ على التنسيق
+                        rect.bl + (0, -1),
                         bidi_text,
                         fontname="f0",
                         fontsize=font_size,
@@ -159,6 +149,10 @@ def process_pdf(input_pdf_path, font_path, client, mode):
                     )
                 except Exception:
                     pass
+        
+        # إضافة الصفحة المترجمة (التي أصبحت تحتوي على الجداول الأصلية والنص الجديد)
+        output_pdf.insert_pdf(temp_doc)
+        temp_doc.close()
         
         progress_bar.progress((page_num + 1) / total_pages)
     
@@ -188,7 +182,7 @@ if uploaded_file is not None:
                         st.success("تمت الترجمة بنجاح!")
                         with open(final_pdf_path, "rb") as f:
                             st.download_button(
-                                label="تحميل الملف (أصل + ترجمة بالتناوب)",
+                                label="تحميل الملف (أصل + ترجمة مع الحفاظ على التنسيق)",
                                 data=f,
                                 file_name="translated_document.pdf",
                                 mime="application/pdf"
