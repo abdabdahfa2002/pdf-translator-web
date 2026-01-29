@@ -15,7 +15,7 @@ from bidi.algorithm import get_display
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
 # إضافة الإهداء الخاص
-st.markdown("<h3 style='text-align: center; color: #FF69B4;'>مقدم للطالبة الذكية بنت ابوها رحمة خالد 🥰🌚😁♥️</h3>", unsafe_url_ strawberries=True)
+st.markdown("<h3 style='text-align: center; color: #FF69B4;'>مقدم للطالبة الذكية بنت ابوها رحمة خالد 🥰🌚😁♥️</h3>", unsafe_allow_html=True)
 
 st.title("🚀 مترجم PDF الاحترافي (أصل + ترجمة)")
 st.write("ترجمة النصوص مع الحفاظ على التنسيق الأصلي وعرض الصفحات بالتناوب.")
