@@ -14,6 +14,19 @@ from bidi.algorithm import get_display
 # إعداد واجهة المستخدم
 st.set_page_config(page_title="مترجم PDF الاحترافي", layout="wide")
 
+# إخفاء عناصر Streamlit الافتراضية (Header, Footer, Menu)
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            .stAppDeployButton {display:none;}
+            [data-testid="stToolbar"] {visibility: hidden !important;}
+            [data-testid="stDecoration"] {display:none !important;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # إضافة الإهداء الخاص
 st.markdown("<h3 style='text-align: center; color: #FF69B4;'>مقدم للطالبة الذكية بنت ابوها رحمة خالد 🥰🌚😁♥️</h3>", unsafe_allow_html=True)
 
